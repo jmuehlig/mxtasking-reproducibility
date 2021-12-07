@@ -14,8 +14,7 @@ Using this scripts, you can reproduce the results of our [paper](https://doi.org
 
 ## Minimal setup
 * [Download](http://www.tpc.org/tpc_documents_current_versions/download_programs/tools-download-request5.asp?bm_type=TPC-H&bm_vers=2.18.0&mode=CURRENT-ONLY) and compile TPC-H and set the path to the folder containing `dgben` in `setup_environment.sh` (variable `DIR_TPCH_DBGEN`).
-* If you are running Ubuntu, install all missing dependencies by running `sudo ./install_dependencies.sh`. The script will also ask if [Intel VTune](https://www.intel.com/content/www/us/en/develop/documentation/)
-installation-guide-for-intel-oneapi-toolkits-linux/top/installation.html) should be installed.
+* If you are running Ubuntu, install all missing dependencies by running `sudo ./install_dependencies.sh`. The script will also ask if [Intel VTune](https://www.intel.com/content/www/us/en/develop/documentation/installation-guide-for-intel-oneapi-toolkits-linux/top/installation.html) should be installed.
 * If you do *not* run Ubuntu, execute `./check.sh` to list all missing dependencies and install them on your own.
 
 ## Minimal reproduce
