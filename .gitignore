@@ -1,0 +1,5 @@
+scripts/*.pdf
+benchmark-results/
+projects/
+plots/
+workloads/tpch/*.tbl

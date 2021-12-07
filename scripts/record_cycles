@@ -1,0 +1,101 @@
+#!/usr/bin/python3
+
+import argparse
+import os
+import csv
+import shutil
+
+
+def write_csv_relative(csv_file_name: str, count_operations: int):
+	with open(csv_file_name, 'r') as source_csv_file:
+		with open(csv_file_name + '.tmp', 'w') as target_csv_file:
+			for line in source_csv_file:
+				if line == 'war:Column filter is ON.':
+					continue
+				elif line.startswith('Function'):
+					target_csv_file.write(line)
+				else:
+					columns = line.split('\t')
+					if len(columns) == 2:
+						target_csv_file.write('{}\t{}\n'.format(columns[0], int(int(columns[1]) / count_operations)))
+	os.rename(csv_file_name + '.tmp', csv_file_name)
+
+
+def record_perf(out_file: str, executable_and_arguments: str):
+	if os.path.exists(out_file):
+		os.remove(out_file)
+	os.system('perf record -o {} {}'.format(out_file, executable_and_arguments))
+	
+
+def import_to_vtune(perf_file: str, vtune_dir: str):
+	if os.path.exists(vtune_dir):
+		shutil.rmtree(vtune_dir)
+	os.system('vtune -import {} -r {}'.format(perf_file, vtune_dir))
+	os.remove(perf_file)
+
+
+def vtune_to_csv(count_iterations: int, count_fill_operations: int, count_mixed_operations: int, vtune_dir: str, fill_csv_file_path: str, mixed_csv_file_path: str):
+	def list_to_filter(ids:list) -> str:
+		full_filter = []
+		for i in ids:
+			full_filter.append('-filter=thread-id={}'.format(i))
+		return ' '.join(full_filter)
+
+	threads = read_thread_ids(vtunes_result_dir)
+	worker_threads = threads[3:]
+	count_threads = len(worker_threads)
+	count_worker_threads_per_iteration = int(count_threads / count_iterations)
+	count_worker_threads_per_iteration_phase = int(count_worker_threads_per_iteration / 2)
+	
+	fill_threads = []
+	mixed_threads = []
+	for iteration in range(0, count_iterations):
+		for j in range(0, count_worker_threads_per_iteration_phase):
+			fill_threads.append(worker_threads[iteration * count_worker_threads_per_iteration + j])
+		for j in range(count_worker_threads_per_iteration_phase, count_worker_threads_per_iteration_phase*2): # for mixed
+			mixed_threads.append(worker_threads[iteration * count_worker_threads_per_iteration + j])
+		
+	os.system('vtune -report hotspots -r {} -column="Hardware Event Count:cycles:Self" -format csv -csv-delimiter=tab -report-output={} {}'.format(vtune_dir, fill_csv_file_path, list_to_filter(fill_threads)))
+	write_csv_relative(fill_csv_file_path, count_iterations * count_fill_operations)
+	os.system('vtune -report hotspots -r {} -column="Hardware Event Count:cycles:Self" -format csv -csv-delimiter=tab -report-output={} {}'.format(vtune_dir, mixed_csv_file_path, list_to_filter(mixed_threads)))
+	write_csv_relative(mixed_csv_file_path, count_iterations * count_mixed_operations)
+	
+	
+def read_thread_ids(vtune_dir: str) -> list:
+	thread_ids_file = '{}/threadid.csv'.format(vtune_dir)
+	os.system('vtune -R hotspots -r {} -group-by=thread-id -format=csv -csv-delimiter=tab -report-output={}'.format(vtune_dir, thread_ids_file))
+	thread_ids = []
+	with open(thread_ids_file) as csv_file:
+		csv_reader = csv.reader(csv_file, delimiter='\t')
+		next(csv_reader)
+		for row in csv_reader:
+			if row[0] not in thread_ids:
+				thread_ids.append(row[0])
+	return sorted(thread_ids)
+
+
+parser = argparse.ArgumentParser(description='Process some integers.')
+parser.add_argument('-n', dest='name', type=str, help='name of the record', default='profile')
+parser.add_argument('-cf', dest='count_fill', type=int, help='number of operations in fill phase', default=1)
+parser.add_argument('-cm', dest='count_mixed', type=int, help='number of operations in mixed phase', default=1)
+parser.add_argument('-exec', dest='prog', type=str, help='executable, escaped with quotes when using parameter', default='')
+parser.add_argument('-o', dest='output_dir', type=str, help='Name of the output dir', default='')
+
+args = parser.parse_args()
+output_dir = args.output_dir
+if not len(output_dir) == 0 and not output_dir.endswith('/'):
+	output_dir += '/'
+
+perf_name = output_dir + args.name + '.perf'
+vtunes_result_dir = output_dir + args.name + '-vtunes'
+executable = args.prog
+
+count_iterations = 1
+executable_parts = executable.split(' ')
+for i, j in zip(executable_parts, executable_parts[1:]):
+	if i == '-i' or i == '--iterations':
+		count_iterations = int(j)
+
+record_perf(perf_name, executable)
+import_to_vtune(perf_name, vtunes_result_dir)
+vtune_to_csv(count_iterations, args.count_fill, args.count_mixed, vtunes_result_dir, output_dir+args.name + '-fill.csv', output_dir+args.name + '-mixed.csv')

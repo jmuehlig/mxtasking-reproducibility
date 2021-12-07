@@ -1,0 +1,246 @@
+#!/usr/bin/python3
+
+import sys
+import collections
+import re
+import os
+import pandas
+import shutil
+import numpy as np
+import argparse
+import time
+import subprocess
+import json
+
+'''
+	Dependencies:
+		- pandas (pip3 install pandas)
+		- numpy (apt-get install python3-numpy)
+		- PyGnuplot (pip3 install PyGnuplot)
+		- matplotlib (pip3 install matplotlib)
+		- python3-tk (apt-get install python3-tk)
+'''
+
+def load_name_map(file_name: str):
+	names = {}
+	if os.path.isfile(file_name):
+		name_pattern = re.compile("([a-zA-Z0-9\\_\\-\\\]+)\s*=\s*([a-zA-Z0-9\\s\\_\\-\\\]+)")
+		with open(file_name, "r") as file:
+			for line in file:
+				match = name_pattern.match(line)
+				if match:
+					names[match.group(1)] = match.group(2).replace('\n', '')
+	return names
+
+
+def float_from_scientific_notation(throughput) -> float:
+	if throughput is None:
+		return float(0)
+	elif "e" not in throughput:
+		return float(throughput.replace(",", ""))
+	else:
+		exp_regex = re.compile(r"([\d+\.]+)[Ee]\+(\d+)")
+		match = exp_regex.match(throughput)
+		if match:
+			coefficient, exponent = match.groups()
+			return float(coefficient) * (10 ** int(exponent))
+		else:
+			return float(0)
+
+
+def parse_json_line(line: str, item_name: str):
+	iteration = json.loads(line)
+	iter = {
+		"name": item_name,
+		"count_cores": iteration["cores"],
+		"phase": int(iteration["phase"]),
+		"throughput": float(iteration["throughput"])
+	}
+	if "instr" in iteration:
+		iter["instructions"] = float(iteration["instr"])
+
+	if "cycles" in iteration:
+		iter["cycles"] = float(iteration["cycles"])
+
+	if "memory-stall" in iteration:
+		iter["memory_stalls"] = float(iteration["memory-stall"])
+		
+	if "worker-fills" in iteration:
+		iter["worker_fills"] = float(iteration["worker-fills"])
+	return iter
+
+
+def parse_raw_line(line : str, item_name : str):
+	raw_pattern = re.compile("(\d+) (\d+) (\d+)[\t\s]+([\d\,]+) ms[\t\s]+([\d\.\,\+e]+) op/s([\t\s]+([\d\,\.]+) ins/op[\t\s]+([\d\,\.]+) cycles/op[\t\s]+([\d\,\.]+) l1-miss/op[\t\s]+([\d\,\.]+) llc-miss/op[\t\s]+([\d\,\.]+) memory-stalls/op)?$")
+	raw_match = raw_pattern.match(line)
+	if raw_match:
+		return {
+			"name": item_name,
+			"count_cores": int(raw_match.group(1)),
+			"phase": int(raw_match.group(3)),
+			"throughput": float_from_scientific_notation(raw_match.group(5)),
+			"instructions": float_from_scientific_notation(raw_match.group(7)),
+			"cycles": float_from_scientific_notation(raw_match.group(8)),
+			"memory_stalls": float_from_scientific_notation(raw_match.group(11))
+		}
+
+
+def is_json(log_file: str) -> bool:
+	return log_file.endswith('.json')
+
+
+
+def parse_log_file(log_files: list, name_map) -> list:
+	benchmark_items = []
+	item_names = []
+
+	for log_file_path in log_files:
+
+		# parse
+		with open(log_file_path, "r") as log_file:
+			item_name = '.'.join(os.path.basename(log_file.name).split('.')[:-1])
+			if item_name in name_map:
+				item_name = name_map[item_name]
+
+			# name of logfile without last .ending
+			item_names.append(item_name)
+
+			if is_json(log_file_path):
+				for line in log_file:
+					benchmark_items.append(parse_json_line(line, item_name))
+			else:
+				for line in log_file:
+					item = parse_raw_line(line, item_name)
+					if item:
+						benchmark_items.append(item)
+
+	data_frame = pandas.DataFrame(benchmark_items)
+	return data_frame.sort_values(by=['count_cores', 'phase'])
+
+
+def human_readable_memory_size(memory_size : int) -> str:
+	if memory_size >= (1024 * 1024 * 1024):
+		return "{}GB".format(int(memory_size / (1024 * 1024 * 1024)))
+	elif memory_size >= (1024 * 1024):
+		return "{}MB".format(int(memory_size / (1024 * 1024)))
+	elif memory_size >= 1024:
+		return "{}kB".format(int(memory_size / 1024))
+	else:
+		return "{}B".format(memory_size)
+
+
+def plot_scale(data_frame, column: str, label: str, file_name: str):
+
+	rgb_colors = ["#83a67f", "#494066", "#990000", "#b39169", "#ebb13d", "#9db8d2", "#46a046"]
+
+	grouped_data_frame  = data_frame.groupby(['name', 'count_cores', 'phase'])[column].agg(['mean']).reset_index()
+	max_y = grouped_data_frame["mean"].max() * 1.15
+
+	script = 'set terminal pdf enhanced font "Verdana,13"\n'
+	script = script + 'set output "{}.pdf"\n\n'.format(file_name)
+
+	# Style
+	script = script + 'set title ""\n'
+	script = script + 'set key off\n'
+	script = script + 'set key above\n'
+
+	# x axis
+	script = script + 'set xtics nomirror\n'
+	script = script + 'set xlabel "Cores"\n'
+	# script = script + 'set xrange [0:{}]\n'.format(grouped_data_frame.count_cores.max() + 1)
+	# script = script + 'set xtics 1\n'
+	# script = script + 'set xrange [1:{}]\n'.format(grouped_data_frame.count_cores.max())
+
+	# y axis
+	script = script + 'set ytics nomirror\n'
+	script = script + 'set ylabel "{}"\n'.format(label)
+	script = script + 'set yrange [0:{}]\n'.format(max_y)
+	script = script + 'set grid ytics\n\n'
+
+	data_file_name = "{}.data".format(file_name)
+	data = [grouped_data_frame.count_cores.unique()]
+
+	names = grouped_data_frame.name.unique()
+	phases = grouped_data_frame.phase.unique()
+
+	for phase in phases:
+		for name in names:
+			data.append(grouped_data_frame.query('phase == {} & name == "{}"'.format(phase, name))["mean"].to_numpy())
+
+	with open(data_file_name, "w") as data_file:
+		x_len = len(data)
+		y_len = len(data[0])
+
+		header = "#cores\t"
+		counter = 2
+		for phase in phases:
+			for name in names:
+				header = header + "{}(phase {})({})\t".format(name, phase, counter)
+				counter += 1
+
+		header = header + "\n"
+		data_file.write(header)
+
+		for row in range(0, len(data[0])):
+			line = ""
+			for col in range(0, len(data)):
+				if col > 0:
+					line = line + "\t"
+				line = line + str(data[col][row])
+			line = line + "\n"
+			data_file.write(line)
+
+	script = script + 'plot '
+	current_plot = 0
+	for label_index in range(0, len(names)):
+		for phase in range(0, len(phases)):
+			if phase == 0:
+				title = "{} (write-heavy)".format(names[label_index])
+			else:
+				title = "{} (mixed)".format(names[label_index])
+
+			if current_plot == 0:
+				script = script + '"{}"'.format(data_file_name)
+			else:
+				script = script + ', ""'
+			script = script + ' using {}:xticlabels(1) with linespoints ls {} lw 2 lc rgb "{}" title "{}"'.format(current_plot + 2, current_plot + 1, rgb_colors[current_plot % len(rgb_colors)], title)
+			current_plot = current_plot + 1
+
+	script_file_name = "{}.plt".format(file_name)
+	with open(script_file_name, "w") as gnuplot_file:
+		gnuplot_file.write(script)
+
+	subprocess.run(["gnuplot", script_file_name])
+
+################################ Program starts here ################################
+parser = argparse.ArgumentParser(description="Plot benchmark results generated by the index benchmark framework.")
+parser.add_argument('input_files', metavar='INPUT_FILE', type=str, nargs='+', help='Input files to plot.')
+parser.add_argument('-o', dest='output_directory', type=str, help='Output directory', default='./')
+parser.add_argument('-p', dest='prefix', type=str, help='Prefix of the file names', default='')
+parser.add_argument('--perf', dest='perf', action='store_true', default=False, help='Generate plots for performance counter')
+
+arguments = parser.parse_args()
+name_map = load_name_map("name.map")
+
+prefix = arguments.prefix
+if not prefix.endswith('-') and not prefix.endswith('_') and prefix:
+	prefix = prefix + '-'
+
+data_frame = parse_log_file(arguments.input_files, name_map)
+
+plot_scale(data_frame, "throughput", "Throughput (Tuples / Sec)", "{}/{}throughput".format(arguments.output_directory, prefix))
+if arguments.perf:
+	plot_scale(data_frame, "cycles", "Cycles / Tuple", "{}/{}cycles".format(arguments.output_directory, prefix))
+	plot_scale(data_frame, "instructions", "Instructions / Tuple", "{}/{}instructions".format(arguments.output_directory, prefix))
+	plot_scale(data_frame, "memory_stalls", "Memory Stalls / Tuple", "{}/{}memory-stalls".format(arguments.output_directory, prefix))
+	
+if "worker_fills" in data_frame:
+	plot_scale(data_frame, "worker_fills", "Fills / Tuple", "{}/{}worker-fills".format(arguments.output_directory, prefix))
+
+# for cores in data_frame.count_cores.unique():
+# 	for memory_size in data_frame[data_frame.count_cores == cores].mem_size.unique():
+# 		data = data_frame[(data_frame.count_cores == cores) & (data_frame.mem_size == memory_size)]
+# 		plot(data , "throughput", "Throughput (Tuples / Sec)", "{}/{}throughput_{}_{}".format(arguments.output_directory, arguments.prefix, human_readable_memory_size(memory_size), cores))
+# 		plot(data , "memory_stalls", "Memory Stalls / Tuple", "{}/{}memory-stalls_{}_{}".format(arguments.output_directory, arguments.prefix, human_readable_memory_size(memory_size), cores))
+
+#####################################################################################

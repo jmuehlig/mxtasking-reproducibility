@@ -1,0 +1,68 @@
+#!/usr/bin/python3
+
+import sys
+import csv
+import re
+import os
+from collections import namedtuple
+
+CalledFunction = namedtuple('CalledFunction', ['name', 'filter'])
+
+def keyword(keywords, function_name : str, file_name : str) -> str:
+	for key, words in keywords.items():
+		for word in words:
+			if function_name.startswith(word.name) or function_name.endswith(word.name):
+				if len(word.filter) == 0 or len([x for x in word.filter if x in file_name]) > 0:
+					return key
+	return 'other'
+
+if len(sys.argv) < 3:
+	print("Usage: {} <out-file> <file-to-parse.csv> [<file-to-parse.csv>...] ".format(sys.argv[0]))
+else:
+	keywords = {}
+	keyword_regex = re.compile("^#([a-zA-Z0-9\s]+)")
+	called_function_regex = re.compile("([^{]*)({[^}]*})?")
+	current_keyword = "other"
+	with open("cycles-keywords.txt") as keyword_file:
+		for keyword_line in keyword_file:
+			row = keyword_line.strip().replace('\n', '') 
+			match = re.match(keyword_regex, row)
+			if len(row) > 0:
+				if match:
+					current_keyword = match.group(1).strip()
+				else:
+					if not current_keyword in keywords:
+						keywords[current_keyword] = []
+						
+					called_match = re.match(called_function_regex, row)
+					if called_match:
+						if called_match.group(2) == None:
+							keywords[current_keyword].append(CalledFunction(row,[]))
+						else:
+							filters = called_match.group(2).replace('{','').replace('}','').split(',')
+							keywords[current_keyword].append(CalledFunction(called_match.group(1), filters))
+			
+	out_file_name = sys.argv[1]
+	
+	if 'other' not in keywords:
+		keywords['other'] = []
+	
+	with open(out_file_name, 'w') as out_file:
+		comment = "#Name\t" + '\t'.join(keywords)
+		out_file.write(comment + '\n')
+		
+		for in_file in sys.argv[2:]:
+			times = {}
+			for k in keywords:
+				times[k] = 0
+				
+			with open(in_file) as csv_file:
+				reader = csv.reader(csv_file, delimiter='\t', quotechar='"')
+				for row in reader:
+					if not "Function" in row[0]:
+						keyword_of_function = keyword(keywords, row[0], in_file)
+						times[keyword_of_function] += int(row[1]) 
+			out = re.sub('-pd\d', '', os.path.basename(in_file).replace('cycles-', '').replace('.csv', '').replace('a-fill', '').replace('a-mixed','').replace('c-mixed', ''))[:-1]
+			for k in keywords:
+				out += '\t' + str(times[k])
+			out_file.write(out + '\n')
